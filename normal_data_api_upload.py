@@ -6,6 +6,8 @@ import base64
 import os
 import tempfile
 import uuid
+import io
+from PIL import Image
 
 # LangChain
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -13,8 +15,14 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.chains import RetrievalQA
 
+# Hugging Face - BLIP for image captioning
+from transformers import BlipProcessor, BlipForConditionalGeneration
 
 app = FastAPI()
+
+# Load BLIP model only once (at app startup)
+processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
 
 # In-memory cache for session-based vectorstores
 VECTOR_STORE_CACHE = {}
@@ -49,7 +57,7 @@ async def extract_pdf_data(file: UploadFile = File(...)):
                         table_dict.append(row_dict)
                     extracted_tables.append(table_dict)
 
-        # ---- STEP 3: Extract and convert images to base64 ----
+        # ---- STEP 3: Extract images and generate captions using BLIP ----
         doc = fitz.open(temp_pdf_path)
         for page_index in range(len(doc)):
             for img_index, img in enumerate(doc.get_page_images(page_index)):
@@ -59,12 +67,19 @@ async def extract_pdf_data(file: UploadFile = File(...)):
                 image_ext = base_image.get("ext", "png")
                 base64_str = base64.b64encode(image_bytes).decode('utf-8')
 
+                # Generate caption using BLIP
+                image_pil = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                inputs = processor(images=image_pil, return_tensors="pt")
+                out = model.generate(**inputs)
+                caption = processor.decode(out[0], skip_special_tokens=True)
+
                 extracted_images.append({
                     "filename": f"image_{page_index}_{img_index}.{image_ext}",
                     "extension": image_ext,
                     "base64": base64_str,
                     "size_bytes": len(image_bytes),
-                    "page": page_index
+                    "page": page_index,
+                    "metadata": caption
                 })
         doc.close()
         os.remove(temp_pdf_path)
@@ -85,7 +100,7 @@ async def extract_pdf_data(file: UploadFile = File(...)):
         VECTOR_STORE_CACHE[session_id] = vectorstore
 
         return {
-            "message": "PDF processed and stored in memory",
+            "message": "PDF processed and stored in memory with image captions",
             "session_id": session_id,
             "num_chunks": len(chunks),
             "chunks": chunks,
@@ -96,6 +111,9 @@ async def extract_pdf_data(file: UploadFile = File(...)):
 
     except Exception as e:
         return {"error": str(e)}
+
+
+
     
 #This part is commented because it is used to check the output, whether it can be fetched or not from the vectordb and it is working
 

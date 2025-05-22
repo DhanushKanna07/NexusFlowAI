@@ -71,3 +71,7 @@ Run similarity-based searches later using the vector database
 
 
 The code i commented fully (down) is the part where i checked in GET/Search where it can call the data from the data chunk.It successfully retrived the required chunk where i asked the question from the VectorDB
+
+
+
+Extra Added BLIP model from Huggingface for Metadata storage

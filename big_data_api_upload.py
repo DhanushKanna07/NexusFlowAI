@@ -1,12 +1,15 @@
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse
 import uuid
 import tempfile
 import os
 import fitz
 import pdfplumber
 import base64
+import io
+from PIL import Image, UnidentifiedImageError
 
+from transformers import BlipProcessor, BlipForConditionalGeneration
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -16,7 +19,10 @@ app = FastAPI()
 VECTOR_STORE_CACHE = {}
 IMAGE_TABLE_CACHE = {}
 
-# ========= Upload PDF, Process, and Store in Memory ========= #
+# Initialize BLIP model for image captioning
+processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+
 @app.post("/upload-to-memory")
 async def upload_to_memory(file: UploadFile = File(...)):
     try:
@@ -53,21 +59,38 @@ async def upload_to_memory(file: UploadFile = File(...)):
                         "data": table_dict
                     })
 
-        # Step 2: Extract images
+        # Step 2: Extract images and generate captions
         doc = fitz.open(pdf_path)
         for page_index in range(len(doc)):
             for img_index, img in enumerate(doc.get_page_images(page_index)):
-                xref = img[0]
-                base_image = doc.extract_image(xref)
-                image_bytes = base_image["image"]
-                base64_str = base64.b64encode(image_bytes).decode('utf-8')
-                image_ext = base_image.get("ext", "png")
-                extracted_images.append({
-                    "filename": f"image_{page_index}_{img_index}.{image_ext}",
-                    "extension": image_ext,
-                    "base64": base64_str,
-                    "page": page_index
-                })
+                try:
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    image_ext = base_image.get("ext", "png")
+                    base64_str = base64.b64encode(image_bytes).decode('utf-8')
+
+                    # Generate caption using BLIP
+                    image_pil = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                    inputs = processor(images=image_pil, return_tensors="pt")
+                    out = model.generate(**inputs)
+                    caption = processor.decode(out[0], skip_special_tokens=True)
+
+                    extracted_images.append({
+                        "filename": f"image_{page_index}_{img_index}.{image_ext}",
+                        "extension": image_ext,
+                        "base64": base64_str,
+                        "page": page_index,
+                        "metadata": caption
+                    })
+                except UnidentifiedImageError:
+                    extracted_images.append({
+                        "filename": f"image_{page_index}_{img_index}.unknown",
+                        "extension": "unknown",
+                        "base64": None,
+                        "page": page_index,
+                        "metadata": "Unable to process image"
+                    })
         doc.close()
         os.remove(pdf_path)
 
@@ -101,6 +124,8 @@ async def upload_to_memory(file: UploadFile = File(...)):
 
     except Exception as e:
         return {"error": str(e)}
+
+
     
 
 #This part is commented because it is used to check the output,whether it can be fetched or not from the vectordb can be fetched or not and it is working
